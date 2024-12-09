@@ -1,2 +1,2 @@
 # arm-thumb_inject_hook
-injection and hook on arm platform cpu
+injection and hooking on arm cpu and embed linux devices.
