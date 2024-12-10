@@ -1,100 +1,34 @@
-/***************************************************
- *  Author :yong夜
- *
- *  声明Inline Hook过程中用到的所有功能函数、头文件
- *  目前支持32位系统的arm32、thumb-2指令集
- * *************************************************/
+#ifndef _INLINEHOOK_H
+#define _INLINEHOOK_H
 
-//#include <stdio.h>
-//#include <Android/log.h>
-#include <errno.h>
-#include <unistd.h>
-#include <sys/mman.h>
-#include <string.h>
-#include <stdlib.h>
-#include <sys/ptrace.h>
-#include <stdbool.h>
 #include <stdio.h>
 #include <stdint.h>
 
-
-#ifndef BYTE
-#define BYTE unsigned char
+#ifdef __cplusplus
+extern "C" {
 #endif
 
-#define ARM32OPCODEMAXLEN 8     //32bit ARM指令集需要替换的指令长度
-#define THUMB32OPCODEMAXLEN 10
+enum ele7en_status {
+	ELE7EN_ERROR_UNKNOWN = -1,
+	ELE7EN_OK = 0,
+	ELE7EN_ERROR_NOT_INITIALIZED,
+	ELE7EN_ERROR_NOT_EXECUTABLE,
+	ELE7EN_ERROR_NOT_REGISTERED,
+	ELE7EN_ERROR_NOT_HOOKED,
+	ELE7EN_ERROR_ALREADY_REGISTERED,
+	ELE7EN_ERROR_ALREADY_HOOKED,
+	ELE7EN_ERROR_SO_NOT_FOUND,
+	ELE7EN_ERROR_FUNCTION_NOT_FOUND
+};
 
-#define LOG_TAG "Inline Hook"
-#define LOGI(format, args...) printf( format, ##args)
+enum ele7en_status registerInlineHook(uint32_t target_addr, uint32_t new_addr, uint32_t **proto_addr);
+enum ele7en_status inlineUnHook(uint32_t target_addr);
+void inlineUnHookAll();
+enum ele7en_status inlineHook(uint32_t target_addr);
+void inlineHookAll();
 
-#define CHECK_BIT0(addr)    (addr & 1)
-#define SET_BIT0(addr)      (addr & 0xFFFFFFFE)
-#define SET_BIT1(addr)      (addr | 1)
-
-/* arm shellcode里用到的参数、变量*/
-extern unsigned long _shellcode_start_s;
-extern unsigned long _shellcode_end_s;
-extern unsigned long _hookstub_function_addr_s; //根函数地址
-extern unsigned long _old_function_addr_s;  //原指令地址
-
-/* thumb-2 shellcode里用到的参数和变量*/
-extern unsigned long _shellcode_start_s_thumb;
-extern unsigned long _shellcode_end_s_thumb;
-extern unsigned long _hookstub_function_addr_s_thumb; //根函数地址
-extern unsigned long _old_function_addr_s_thumb; 
-
-/* hook点信息*/
-typedef struct armHookPointInfo
-{
-    char *pHookAddr;                        //需要hook的位置
-    void *pStubShellCodeAddr;               //桩函数(shellcode)地址
-    void (*onCallBack)(struct pt_regs *);   //用户自定义的替换函数
-    void **ppOldFuncAddr;                   //*ppOldFuncAddr即指向原指令函数处的指针
-    BYTE szbyBackupOpcodes[ARM32OPCODEMAXLEN];   //原指令的opcode
-} ARM_INLINE_HOOK_INFO;
-
-typedef struct thumbHookPointInfo
-{
-    void *pHookAddr; 
-    void *pStubShellCodeAddr;
-    void (*onCallBack)(struct pt_regs *);
-    void **ppOldFuncAddr;
-    int thumb2OpcodeLen;
-    BYTE szbyBackupOpcodes[THUMB32OPCODEMAXLEN];
-} THUMB_INLINE_HOOK_INFO;
-
-/* common function */
-extern "C" bool ChangePageProperty(void *pAddress, size_t size);
-
-extern "C" void * GetModuleBaseAddr(pid_t pid, char* pszModuleName);
-
-/* For 32 bit Arm instruction set */
-extern "C" bool InitArmHookInfo(ARM_INLINE_HOOK_INFO* pstInlineHook);
-
-extern "C" bool BuildArmStub(ARM_INLINE_HOOK_INFO* pstInlineHook);
-
-extern "C" bool BuildArmJumpCode(void *pCurAddress , void *pJumpAddress);
-
-extern "C" bool BuildArmOldFunction(ARM_INLINE_HOOK_INFO* pstInlineHook);
-
-extern "C" bool RebuildArmHookTarget(ARM_INLINE_HOOK_INFO* pstInlineHook);
-
-extern "C" bool RestroeArmHookTarget(ARM_INLINE_HOOK_INFO* pstInlineHook);
-
-extern "C" bool HookArm(ARM_INLINE_HOOK_INFO* pstInlineHook);
-
-/* For Thumb-2 instruction set */
-extern "C" bool InitThumbHookInfo(THUMB_INLINE_HOOK_INFO* pstInlineHook);
-
-extern "C" bool BuildThumbStub(THUMB_INLINE_HOOK_INFO* pstInlineHook);
-
-extern "C" bool BuildThumbJumpCode(void *pCurAddress , void *pJumpAddress);
-
-extern "C" bool BuildThumbOldFunction(THUMB_INLINE_HOOK_INFO* pstInlineHook);
-
-extern "C" bool RebuildThumbHookTarget(THUMB_INLINE_HOOK_INFO* pstInlineHook);
-
-extern "C" bool RestroeThumbHookTarget(THUMB_INLINE_HOOK_INFO* pstInlineHook);
-
-extern "C" bool HookThumb(THUMB_INLINE_HOOK_INFO* pstInlineHook);
+#ifdef __cplusplus
+}
+#endif
+	
+#endif

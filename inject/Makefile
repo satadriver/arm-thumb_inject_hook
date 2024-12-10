@@ -3,11 +3,12 @@ OBJS = $(SRCS:.c = .o .cpp = .o .s = .o)
 CC = arm-linux-gnueabihf-gcc
 #INCLUDES = -I/×××
 #LIBS = -L/×××
-CCFLAGS = -g -Wall -O0
+CCFLAGS =  -mthumb -g -Wall -O0
+LDFLAGS = 
 inject : $(OBJS)
-	$(CC) $^ -o $@
+	$(CC) $^ -o $@ $(LDFLAGS)
 %.o : %.c %.s %.cpp
-	$(CC) -c $< $(CCFLAGS)
+	$(CC) -c $(CCFLAGS) $<
 clean:
 	rm *.o ./inject
 .PHONY:clean

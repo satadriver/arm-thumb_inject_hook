@@ -1,6 +1,7 @@
 {
     "files.associations": {
         "stdio.h": "c",
-        "inject.h": "c"
+        "inject.h": "c",
+        "xmemory": "c"
     }
 }

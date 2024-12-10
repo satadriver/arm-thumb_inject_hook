@@ -51,7 +51,7 @@ int find_pid_of(const char *process_name)
 
 				char * fn = getProcessName(cmdline);
 
-                if (strcmp(process_name, fn) == 0) {
+                if (strstr(fn, process_name) ) {
                     //printf("success\r\n");
                     pid = id;
                     break;
@@ -120,20 +120,21 @@ void* get_module_base(pid_t pid, const char* module_name)
 
 
 
-void* get_remote_addr(pid_t target_pid, const char* module_name, void* local_addr)
+void* get_remote_addr(pid_t target_pid, const char* module_name, void* local_addr,char * funcname)
 {
     void* local_handle, *remote_handle;
 
     local_handle = get_module_base(-1, module_name);
     remote_handle = get_module_base(target_pid, module_name);
 
-    DEBUG_PRINT("[+] get_remote_addr:function:%x, local[%x], remote[%x]\n",
-    local_addr, local_handle, remote_handle);
-
     //localAddress - localBase = remoteAddress - remoteBase,
     //so remoteAddress = localAddress - localBase + remoteBase
     
     void * ret_addr = (void *)( (uint32_t)remote_handle + (uint32_t)local_addr - (uint32_t)local_handle );
+
+    DEBUG_PRINT("[+] pid:%d %s moudle name:%s, local module address:%p,\
+    remote module address:%p,fucntion name:%s, address:%p\r\n",
+    target_pid, __FUNCTION__, module_name,local_handle, remote_handle, funcname,ret_addr);
 
 #if defined(__i386__)
     if (!strcmp(module_name, libc_path)) {

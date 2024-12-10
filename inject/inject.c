@@ -87,8 +87,9 @@ int ptrace_call(pid_t pid, uint32_t addr, long *params, uint32_t num_params, str
     // push remained params onto stack
     //
     if (i < num_params) {
-        regs->ARM_sp -= (num_params - i) * sizeof(long) ;
-        ptrace_writedata(pid, (unsigned char *)regs->ARM_sp, (uint8_t *)&params[i], (num_params - i) * sizeof(long));
+        int cnt = (num_params - i) ;
+        regs->ARM_sp -= cnt * sizeof(long) ;
+        ptrace_writedata(pid, (unsigned char *)regs->ARM_sp, (uint8_t *)&params[i], cnt * sizeof(long));
     }
 
     regs->ARM_pc = addr;
@@ -288,6 +289,7 @@ int inject_remote_process(pid_t target_pid, const char *library_path, const char
     void * inject_entry_addr;
     void * sohandle ;
     int remote_pid = 0;
+    char * info;
 
     DEBUG_PRINT("[+] Injecting process: %d\n", target_pid);
 
@@ -305,7 +307,7 @@ int inject_remote_process(pid_t target_pid, const char *library_path, const char
     memcpy(&original_regs, &regs, sizeof(regs));
 
 
-    getpid_addr = get_remote_addr(target_pid, libc_path, (void *)getpid);
+    getpid_addr = get_remote_addr(target_pid, libc_path, (void *)getpid,"getpid");
     DEBUG_PRINT("[+] Remote getpid address: %x\n", getpid_addr);
 
     if (ptrace_call_wrapper(target_pid, "getpid", getpid_addr, parameters, 0, &regs) == -1)
@@ -314,7 +316,7 @@ int inject_remote_process(pid_t target_pid, const char *library_path, const char
     remote_pid = (int)ptrace_retval(&regs);
     DEBUG_PRINT("[+] Remote pid: %u\n", remote_pid);
 
-    mmap64_addr = get_remote_addr(target_pid, libc_path, (void *)mmap);
+    mmap64_addr = get_remote_addr(target_pid, libc_path, (void *)mmap,"mmap");
     DEBUG_PRINT("[+] Remote mmap address: %x\n", mmap64_addr);
 
     /* call mmap */
@@ -332,10 +334,10 @@ int inject_remote_process(pid_t target_pid, const char *library_path, const char
 
     map_base = (uint8_t*)ptrace_retval(&regs);
 
-    dlopen_addr = get_remote_addr( target_pid, linker_path, (void *)dlopen );
-    dlsym_addr = get_remote_addr( target_pid, linker_path, (void *)dlsym );
-    dlclose_addr = get_remote_addr( target_pid, linker_path, (void *)dlclose );
-    dlerror_addr = get_remote_addr( target_pid, linker_path, (void *)dlerror );
+    dlopen_addr = get_remote_addr( target_pid, linker_path, (void *)dlopen ,"dlopen");
+    dlsym_addr = get_remote_addr( target_pid, linker_path, (void *)dlsym,"dlsym" );
+    dlclose_addr = get_remote_addr( target_pid, linker_path, (void *)dlclose ,"dlclose");
+    dlerror_addr = get_remote_addr( target_pid, linker_path, (void *)dlerror,"dlerror" );
 
     DEBUG_PRINT("[+] Get imports: dlopen: %x, dlsym: %x, dlclose: %x, dlerror: %x\n",
             dlopen_addr, dlsym_addr, dlclose_addr, dlerror_addr);
@@ -350,6 +352,17 @@ int inject_remote_process(pid_t target_pid, const char *library_path, const char
         goto exit;
 
     sohandle = (void*)ptrace_retval(&regs);
+
+    if(sohandle == 0){
+        if (ptrace_call_wrapper(target_pid, "dlerror", dlerror_addr, parameters, 0, &regs) == -1)
+            goto exit;
+        info = (char*)ptrace_retval(&regs);
+        if(info){
+            char buf[256] = {0};
+            //ptrace_readdata(target_pid, info,buf, 4 );
+            //printf("dlopen error:%s\r\n",buf);
+        }       
+    }
 
 #define FUNCTION_NAME_ADDR_OFFSET       0x100
     ptrace_writedata(target_pid, map_base + FUNCTION_NAME_ADDR_OFFSET, (uint8_t*)function_name, strlen(function_name) + 1);
@@ -391,9 +404,14 @@ exit:
 int main(int argc, char** argv) {
     int ret = 0;
     if(argc < 4){
-        printf("example:inject pid modulePath functionName parameter");
+        printf("example:%s pid modulePath functionName parameter",argv[0]);
+        printf("such as:%s httpd /root/injected.so InjectEntry test\r\n",argv[0]);
         return 0;
     }
+
+    void * localHandle = get_module_base(-1, "inject");
+    printf("local handle:%p,main:%x,inject_remote_process address:%p\r\n",
+    localHandle,main,inject_remote_process);
 
     for(int i = 0;i < argc;i ++){
         printf("argv[%d]:%s\r\n",i,argv[i]);

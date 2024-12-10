@@ -1,719 +1,445 @@
-//#include <asm/cachectl.h>
-#include "InlineHook.h"
+/*
+thumb16 thumb32 arm32 inlineHook
+author: ele7enxxh
+mail: ele7enxxh@qq.com
+website: ele7enxxh.com
+modified time: 2015-01-23
+created time: 2015-11-30
+*/
+#include <sys/types.h>
+#include <stdlib.h>
+#include <stdbool.h>
+#include <string.h>
+#include <dirent.h>
+#include <signal.h>
+#include <sys/mman.h>
+#include <sys/ptrace.h>
+#include <asm/ptrace.h>
+#include <sys/wait.h>
+
+#include <stdint.h>
+#include "relocate.h"
+#include "inlineHook.h"
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/syscall.h>
 
 
-// int cacheflush(void* addr, int nbytes, int cache);
-/**
- *  通用函数：获取so模块加载进内存的基地址，通过查看/proc/$pid/maps文件
- *  
- *  @param  pid             模块所在进程pid，如果访问自身进程，可填小余0的值，如-1
- *  @param  pszModuleName   模块名字
- *  @return void*           模块的基地址，错误返回0 
- */
-void * GetModuleBaseAddr(pid_t pid, char* pszModuleName)
-{
-    FILE *pFileMaps = NULL;
-    unsigned long long ulBaseValue = 0;
-    char szMapFilePath[256] = {0};
-    char szFileLineBuffer[1024] = {0};
+#define gettid() syscall(__NR_gettid)
 
-    /* 判断是否为自身maps文件*/
-    if(pid < 0)
-    {
-        snprintf(szMapFilePath, sizeof(szMapFilePath), "/proc/self/maps");
-    }
-    else
-    {
-        snprintf(szMapFilePath, sizeof(szMapFilePath), "/proc/%d/maps", pid);
-    }
+#ifndef PAGE_SIZE
+#define PAGE_SIZE 4096
+#endif
+
+#define PAGE_START(addr)	(~(PAGE_SIZE - 1) & (addr))
+#define SET_BIT0(addr)		(addr | 1)
+#define CLEAR_BIT0(addr)	(addr & 0xFFFFFFFE)
+#define TEST_BIT0(addr)		(addr & 1)
+
+#define ACTION_ENABLE	0
+#define ACTION_DISABLE	1
 	
-	pFileMaps = fopen(szMapFilePath, "r");
-	if (NULL == pFileMaps)
-	{
-		return (void *)ulBaseValue;
+enum hook_status {
+	REGISTERED,
+	HOOKED,
+};
+
+struct inlineHookItem {
+	uint32_t target_addr;
+	uint32_t new_addr;
+	uint32_t **proto_addr;
+	void *orig_instructions;
+	int orig_boundaries[4];
+	int trampoline_boundaries[20];
+	int count;
+	void *trampoline_instructions;
+	int length;
+	int status;
+	int mode;
+};
+
+struct inlineHookInfo {
+	struct inlineHookItem item[1024];
+	int size;
+};
+
+static struct inlineHookInfo info = {0};
+
+static int getAllTids(pid_t exclude_tid, pid_t *tids)
+{
+	char dir_path[32];
+	DIR *dir;
+	int i;
+	struct dirent *entry;
+	pid_t tid;
+
+	if (exclude_tid < 0) {
+		snprintf(dir_path, sizeof(dir_path), "/proc/self/task");
 	}
-    /* 循环遍历maps文件，找到对应模块名，截取字符串中的基地址*/
-    while (fgets(szFileLineBuffer, sizeof(szFileLineBuffer), pFileMaps) != NULL)
-    {
-        if(strstr(szFileLineBuffer, pszModuleName))
-        {
-            char *pszModuleAddress = strtok(szFileLineBuffer, "-");
-            ulBaseValue = strtoul(pszModuleAddress, NULL, 16);
-            
-            if (ulBaseValue == 0x8000)
-            {
-                ulBaseValue = 0;
-            }
-            break;
-        }
+	else {
+		snprintf(dir_path, sizeof(dir_path), "/proc/%d/task", exclude_tid);
+	}
+
+	dir = opendir(dir_path);
+    if (dir == NULL) {
+    	return 0;
     }
 
-    return (void*)ulBaseValue;
+    i = 0;
+    while((entry = readdir(dir)) != NULL) {
+    	tid = atoi(entry->d_name);
+    	if (tid != 0 && tid != exclude_tid) {
+    		tids[i++] = tid;
+    	}
+    }
+    closedir(dir);
+    return i;
 }
 
-/**
- * 通用函数，修改页属性，让内存块内的代码可执行
- *
- * @param   pAddress    需要修改属性起始地址
- * @param   size        需要修改页属性的长度
- * @return  bool        是否修改成功
- */
-bool ChangePageProperty(void *pAddress, size_t size)
+static bool doProcessThreadPC(struct inlineHookItem *item, struct pt_regs *regs, int action)
 {
-    bool bRet = false;
-    
-    while(1)
-    {
-        if(pAddress == NULL)
-        {
-            LOGI("change page property error.");
-            break;
-        }
+	int offset;
+	int i;
 
-        unsigned long ulPageSize = sysconf(_SC_PAGESIZE);
-        int iProtect = PROT_READ | PROT_WRITE | PROT_EXEC;
-        /*页对齐，以4096的倍数为起始位置*/
-        unsigned long ulNewPageStartAddress = (unsigned long)(pAddress) & ~(ulPageSize - 1);
-        /* 计算至少需要多少内存页(0x1000byte)可以包含size大小*/
-        long lPageCount = (size / ulPageSize) + 1;
-        int iRet = mprotect(( void *)(ulNewPageStartAddress), lPageCount*ulPageSize , iProtect);
+	switch (action)
+	{
+		case ACTION_ENABLE:
+			offset = regs->ARM_pc - CLEAR_BIT0(item->target_addr);
+			for (i = 0; i < item->count; ++i) {
+				if (offset == item->orig_boundaries[i]) {
+					regs->ARM_pc = (uint32_t) item->trampoline_instructions + 
+                    item->trampoline_boundaries[i];
+					return true;
+				}
+			}
+			break;
+		case ACTION_DISABLE:
+			offset = regs->ARM_pc - (int) item->trampoline_instructions;
+			for (i = 0; i < item->count; ++i) {
+				if (offset == item->trampoline_boundaries[i]) {
+					regs->ARM_pc = CLEAR_BIT0(item->target_addr) + item->orig_boundaries[i];
+					return true;
+				}
+			}
+			break;
+	}
 
-        if (iRet == -1)
-        {
-            LOGI("mprotect error:%s", strerror(errno));
-            break;
-        }
-
-        bRet = true;
-		break;
-    }
-
-    return bRet;
+	return false;
 }
 
-/**
- *  ARM32：初始化hook点信息，保存原指令的opcode
- *  
- *  @param  pstInlineHook   保存hook点信息的结构体
- *  @return bool            是否初始化成功
- */
-bool InitArmHookInfo(ARM_INLINE_HOOK_INFO* pstInlineHook)
+static void processThreadPC(pid_t tid, struct inlineHookItem *item, int action)
 {
-    bool bRet = false;
+	struct pt_regs regs;
 
-    while(1)
-    {
-        if(pstInlineHook == NULL)
-        {
-            LOGI("arm pstInlineHook is null");
-            break;
-        }
+	if (ptrace(PTRACE_GETREGS, tid, NULL, &regs) == 0) {
+		if (item == NULL) {
+			int pos;
 
-        memcpy(pstInlineHook->szbyBackupOpcodes, pstInlineHook->pHookAddr, 8);
-		bRet = true;
-		break;
-    }
+			for (pos = 0; pos < info.size; ++pos) {
+				if (doProcessThreadPC(&info.item[pos], &regs, action) == true) {
+					break;
+				}
+			}
+		}
+		else {
+			doProcessThreadPC(item, &regs, action);
+		}
 
-    return bRet;
+		ptrace(PTRACE_SETREGS, tid, NULL, &regs);
+	}
 }
 
-/**
- *  ARM32：构造桩函数
- *
- *  @param  pstInlineHook   保存hook点信息的结构体
- *  @return bool            是否构造成功
- */ 
-bool BuildArmStub(ARM_INLINE_HOOK_INFO* pstInlineHook)
+static pid_t freeze(struct inlineHookItem *item, int action)
 {
-    bool bRet = false;
+	int count;
+	pid_t tids[1024];
+	pid_t pid;
 
-    while(1)
-    {
-        if(pstInlineHook == NULL)
-        {
-            LOGI("arm pstInlineHook is null");
-            break;
-        }
-        
-        /* 需要在shellcode中定义的四个全局变量。*/
-        void *p_shellcode_start_s = &_shellcode_start_s;
-        void *p_shellcode_end_s = &_shellcode_end_s;
-        void *p_hookstub_function_addr_s = &_hookstub_function_addr_s;
-        void *p_old_function_addr_s = &_old_function_addr_s;
-        /* 申请一块内存，放入桩函数的shellcode*/
-        size_t sShellCodeLength =(char*) p_shellcode_end_s - (char*)p_shellcode_start_s;
-        void *pNewShellCode = malloc(sShellCodeLength);
-        
-        if(pNewShellCode == NULL)
-        {
-            LOGI("arm shellcode malloc fail.");
-            break;
-        }
-        memcpy(pNewShellCode, p_shellcode_start_s, sShellCodeLength);
-        if(ChangePageProperty(pNewShellCode, sShellCodeLength) == false)
-        {
-            LOGI("change shell code page property fail.");
-            break;
-        }
+	pid = -1;
+	count = getAllTids(gettid(), tids);
+	if (count > 0) {
+		pid = fork();
 
-      /* ppHookStubFunctionAddr的值是一个变量值的地址。这个变量值是shellcode中用户自定义函数地址(在新申请的空间中)*/
-        void **ppHookStubFunctionAddr =(void**) ((char*)pNewShellCode + ((char*)p_hookstub_function_addr_s -(char*) p_shellcode_start_s));
-        *ppHookStubFunctionAddr = (void*)pstInlineHook->onCallBack;
-        /* 桩函数地址*/
-        pstInlineHook->pStubShellCodeAddr = pNewShellCode;
-        /* _old_function_addr_s变量的地址，这个变量值就是原指令函数的函数指针值*/
-        pstInlineHook->ppOldFuncAddr  =(void**) ((char*)pNewShellCode + ((char*)p_old_function_addr_s -(char*) p_shellcode_start_s));
-		
-        bRet = true;
-        break;
-    }
+		if (pid == 0) {
+			int i;
 
-    return bRet;
+			for (i = 0; i < count; ++i) {
+				if (ptrace(PTRACE_ATTACH, tids[i], NULL, NULL) == 0) {
+					waitpid(tids[i], NULL, WUNTRACED);
+					processThreadPC(tids[i], item, action);
+				}
+			}
+			
+			raise(SIGSTOP);
+
+			for (i = 0; i < count; ++i) {
+				ptrace(PTRACE_DETACH, tids[i], NULL, NULL);
+			}
+
+			raise(SIGKILL);
+		}
+
+		else if (pid > 0) {
+			waitpid(pid, NULL, WUNTRACED);
+		}
+	}
+
+	return pid;
 }
 
-/**
- *  ARM32：构造跳转指令。
- *
- *  @param  pCurAddress      当前地址，要构造跳转指令的位置
- *  @param  pJumpAddress     目的地址，要从当前位置跳过去的地址
- *  @return bool             跳转指令是否构造成功
- */ 
-bool BuildArmJumpCode(void *pCurAddress , void *pJumpAddress)
+static void unFreeze(pid_t pid)
 {
-    bool bRet = false;
+	if (pid < 0) {
+		return;
+	}
 
-    while(1)
-    {
-        if(pCurAddress == NULL || pJumpAddress == NULL)
-        {
-            LOGI("arm jump address null.");
-            break;
-        }
-
-        /* LDR PC, [PC, #-4]的机器码是0xE51FF004 */
-        BYTE szLdrPCOpcodes[8] = {0x04, 0xF0, 0x1F, 0xE5};
-        memcpy(szLdrPCOpcodes + 4, &pJumpAddress, 4);
-        memcpy(pCurAddress, szLdrPCOpcodes, 8);
-        /* 刷新缓存中的指令，防止缓存中指令未进行修改引起的错误*/
-        //cacheflush(*((uint32_t*)pCurAddress), 8, 0);
-	char * addr = *(char**)pCurAddress;
-	//cacheflush(addr,8,0);
-        __clear_cache(addr,(void*)(addr + 8));
-	bRet = true;
-        break;
-    }
-
-    return bRet;
+	kill(pid, SIGCONT);
+	wait(NULL);
 }
 
-/**
- *  ARM：构造原指令函数。申请一块内存，写入原指令和跳转指令
- *      * 执行原指令
- *      * 跳转到原始指令流程中，即原指令的下一条指令处
- *  出了上面两个功能我们还需要将shellcode中的原指令函数地址进行填充，补全桩函数中原指令函数地址
- *
- *  @param  pstInlineHook   hook点相关信息的结构体
- *  @return bool            原指令函数是否构造成功
- */ 
-bool BuildArmOldFunction(ARM_INLINE_HOOK_INFO* pstInlineHook)
+static bool isExecutableAddr(uint32_t addr)
 {
-    bool bRet = false;
-    
-    while(1)
-    {
-        if(pstInlineHook == NULL)
-        {
-            LOGI("build old function , arm pstInlineHook is null");
-            break;
-        }
+	FILE *fp;
+	char line[1024];
+	uint32_t start;
+	uint32_t end;
 
-        /* 8字节原指令，8字节原指令的下一条指令*/
-        void * pNewEntryForOldFunction = malloc(16);
-        if(pNewEntryForOldFunction == NULL)
-        {
-            LOGI("arm new entry for old function malloc fail.");
-            break;
-        }
+	fp = fopen("/proc/self/maps", "r");
+	if (fp == NULL) {
+		return false;
+	}
 
-        if(ChangePageProperty(pNewEntryForOldFunction, 16) == false)
-        {
-            LOGI("arm change new entry page property fail.");
-            break;
-        }
+	while (fgets(line, sizeof(line), fp)) {
+		if (strstr(line, "r-xp") || strstr(line, "rwxp")) {
+			start = strtoul(strtok(line, "-"), NULL, 16);
+			end = strtoul(strtok(NULL, " "), NULL, 16);
+			if (addr >= start && addr <= end) {
+				fclose(fp);
+				return true;
+			}
+		}
+	}
 
+	fclose(fp);
 
-        /* 拷贝原指令到内存块中*/
-        memcpy(pNewEntryForOldFunction, pstInlineHook->szbyBackupOpcodes, 8);
-        /* 拷贝跳转指令到内存块中*/
-        if(BuildArmJumpCode(pNewEntryForOldFunction + 8, pstInlineHook->pHookAddr + 8) == false)
-        {
-            LOGI("arm build jump opcodes for new entry fail.");
-            break;
-        }
-
-        /* 填充shellcode里stub的回调地址*/
-        *(pstInlineHook->ppOldFuncAddr) = pNewEntryForOldFunction;
-
-        bRet = true;
-        break;
-    }
-
-    return bRet;
+	return false;
 }
 
-/**
- *  ARM：覆盖HOOK点的指令，跳转到桩函数的位置
- *
- *  @param  pstInlineHook   inlinehook信息
- *  @return bool            原地跳转指令是否构造成功
- */
-bool RebuildArmHookTarget(ARM_INLINE_HOOK_INFO* pstInlineHook)
+static struct inlineHookItem *findInlineHookItem(uint32_t target_addr)
 {
-    bool bRet = false;
+	int i;
 
-    while(1)
-    {
-        if(pstInlineHook == NULL)
-        {
-            LOGI("arm cover old instructions, pstInlineHook is null");
-            break;
-        }
+	for (i = 0; i < info.size; ++i) {
+		if (info.item[i].target_addr == target_addr) {
+			return &info.item[i];
+		}
+	}
 
-        /* 修改原位置的页属性，保证可写*/
-        if(ChangePageProperty(pstInlineHook->pHookAddr, 8) == false)
-        {
-            LOGI("arm change page property error.");
-            break;
-        }
-
-        /* 覆盖原指令为跳转指令*/
-        if(BuildArmJumpCode(pstInlineHook->pHookAddr, pstInlineHook->pStubShellCodeAddr) == false)
-        {
-            LOGI("arm build jump opcodes for new entry fail.");
-            break;
-        }
-
-        bRet = true;
-        break;
-    }
-
-    return bRet;
+	return NULL;
 }
 
-/**
- *  ARM：恢复原指令，删除hook点
- *
- *  @param  pstInlineHook   inlinehook信息
- *  @return bool            删除hook点是否成功
- */
-bool RestroeArmHookTarget(ARM_INLINE_HOOK_INFO* pstInlineHook)
-{	
-    bool bRet = false;
+static struct inlineHookItem *addInlineHookItem() {
+	struct inlineHookItem *item;
 
-    while(1)
-    {
-        if(pstInlineHook == NULL)
-        {
-            LOGI("arm cover old instructions, pstInlineHook is null");
-            break;
-        }
+	if (info.size >= 1024) {
+        printf("hook point overflow\r\n");
+		return NULL;
+	}
 
-        /* 修改原位置的页属性，保证可写*/
-        if(ChangePageProperty(pstInlineHook->pHookAddr, 8) == false)
-        {
-            LOGI("arm change page property error.");
-            break;
-        }
-		
-		if(InitArmHookInfo(pstInlineHook) == false)
-		{
-			LOGI("arm pstInlineHook is null.");
+	item = &info.item[info.size];
+	++info.size;
+
+	return item;
+}
+
+static void deleteInlineHookItem(int pos)
+{
+	info.item[pos] = info.item[info.size - 1];
+	--info.size;
+}
+
+enum ele7en_status registerInlineHook(uint32_t target_addr, uint32_t new_addr, 
+uint32_t **proto_addr)
+{
+	struct inlineHookItem *item;
+
+	if (!isExecutableAddr(target_addr) || !isExecutableAddr(new_addr)) {
+		return ELE7EN_ERROR_NOT_EXECUTABLE;
+	}
+
+	item = findInlineHookItem(target_addr);
+	if (item != NULL) {
+		if (item->status == REGISTERED) {
+			return ELE7EN_ERROR_ALREADY_REGISTERED;
+		}
+		else if (item->status == HOOKED) {
+			return ELE7EN_ERROR_ALREADY_HOOKED;
+		}
+		else {
+			return ELE7EN_ERROR_UNKNOWN;
+		}
+	}
+
+	item = addInlineHookItem();
+
+	item->target_addr = target_addr;
+	item->new_addr = new_addr;
+	item->proto_addr = proto_addr;
+
+	item->length = TEST_BIT0(item->target_addr) ? 12 : 8;
+	item->orig_instructions = malloc(item->length);
+	memcpy(item->orig_instructions, (void *) CLEAR_BIT0(item->target_addr), item->length);
+
+	item->trampoline_instructions = mmap(NULL, PAGE_SIZE, 
+    PROT_READ | PROT_WRITE | PROT_EXEC, MAP_ANONYMOUS | MAP_PRIVATE, 0, 0);
+	relocateInstruction(item->target_addr, item->orig_instructions, item->length, 
+    item->trampoline_instructions, item->orig_boundaries, 
+    item->trampoline_boundaries, &item->count);
+
+	item->status = REGISTERED;
+
+	return ELE7EN_OK;
+}
+
+static void doInlineUnHook(struct inlineHookItem *item, int pos)
+{
+	mprotect((void *) PAGE_START(CLEAR_BIT0(item->target_addr)), PAGE_SIZE * 2,
+    PROT_READ | PROT_WRITE | PROT_EXEC);
+	memcpy((void *) CLEAR_BIT0(item->target_addr), item->orig_instructions, item->length);
+	mprotect((void *) PAGE_START(CLEAR_BIT0(item->target_addr)), PAGE_SIZE * 2, 
+    PROT_READ | PROT_EXEC);
+	munmap(item->trampoline_instructions, PAGE_SIZE);
+	free(item->orig_instructions);
+
+	deleteInlineHookItem(pos);
+
+	__clear_cache((void*)CLEAR_BIT0(item->target_addr),
+    (void*) (CLEAR_BIT0(item->target_addr) + item->length));
+}
+
+enum ele7en_status inlineUnHook(uint32_t target_addr)
+{
+	int i;
+
+	for (i = 0; i < info.size; ++i) {
+		if (info.item[i].target_addr == target_addr && info.item[i].status == HOOKED) {
+			pid_t pid;
+
+			pid = freeze(&info.item[i], ACTION_DISABLE);
+
+			doInlineUnHook(&info.item[i], i);
+
+			unFreeze(pid);
+
+			return ELE7EN_OK;
+		}
+	}
+
+	return ELE7EN_ERROR_NOT_HOOKED;
+}
+
+void inlineUnHookAll()
+{
+	pid_t pid;
+	int i;
+
+	pid = freeze(NULL, ACTION_DISABLE);
+
+	for (i = 0; i < info.size; ++i) {
+		if (info.item[i].status == HOOKED) {
+			doInlineUnHook(&info.item[i], i);
+			--i;
+		}
+	}
+
+	unFreeze(pid);
+}
+
+static void doInlineHook(struct inlineHookItem *item)
+{
+	mprotect((void *) PAGE_START(CLEAR_BIT0(item->target_addr)), PAGE_SIZE * 2, 
+    PROT_READ | PROT_WRITE | PROT_EXEC);
+
+	if (item->proto_addr != NULL) {
+		*(item->proto_addr) = TEST_BIT0(item->target_addr) ? 
+        (uint32_t *) SET_BIT0((uint32_t) item->trampoline_instructions) : 
+        item->trampoline_instructions;
+	}
+	
+	if (TEST_BIT0(item->target_addr)) {
+		int i;
+
+		i = 0;
+		if (CLEAR_BIT0(item->target_addr) % 4 != 0) {
+			((uint16_t *) CLEAR_BIT0(item->target_addr))[i++] = 0xBF00;  // NOP
+		}
+		((uint16_t *) CLEAR_BIT0(item->target_addr))[i++] = 0xF8DF;
+		((uint16_t *) CLEAR_BIT0(item->target_addr))[i++] = 0xF000;	// LDR.W PC, [PC]
+		((uint16_t *) CLEAR_BIT0(item->target_addr))[i++] = item->new_addr & 0xFFFF;
+		((uint16_t *) CLEAR_BIT0(item->target_addr))[i++] = item->new_addr >> 16;
+	}
+	else {
+		((uint32_t *) (item->target_addr))[0] = 0xe51ff004;	// LDR PC, [PC, #-4]
+		((uint32_t *) (item->target_addr))[1] = item->new_addr;
+	}
+
+	mprotect((void *) PAGE_START(CLEAR_BIT0(item->target_addr)), PAGE_SIZE * 2, 
+    PROT_READ | PROT_EXEC);
+
+	item->status = HOOKED;
+	
+	__clear_cache((void*)CLEAR_BIT0(item->target_addr),
+    (void*)(CLEAR_BIT0(item->target_addr) + item->length) );
+}
+
+enum ele7en_status inlineHook(uint32_t target_addr)
+{
+	int i;
+	struct inlineHookItem *item;
+
+	item = NULL;
+	for (i = 0; i < info.size; ++i) {
+		if (info.item[i].target_addr == target_addr) {
+			item = &info.item[i];
 			break;
 		}
-        /* 恢复原指令*/
-		memcpy(pstInlineHook->pHookAddr, pstInlineHook->szbyBackupOpcodes, 8);
-		char*  buf = (char*)(*pstInlineHook->pHookAddr);
-		__clear_cache(buf,(void*)(buf + 8));
-		//cacheflush((char*)buf, 8, 0);
-		
-        bRet = true;
-        break;
-    }
+	}
 
-    return bRet;
+	if (item == NULL) {
+		return ELE7EN_ERROR_NOT_REGISTERED;
+	}
+
+	if (item->status == REGISTERED) {
+		pid_t pid;
+
+		pid = freeze(item, ACTION_ENABLE);
+
+		doInlineHook(item);
+
+		unFreeze(pid);
+
+		return ELE7EN_OK;
+	}
+	else if (item->status == HOOKED) {
+		return ELE7EN_ERROR_ALREADY_HOOKED;
+	}
+	else {
+		return ELE7EN_ERROR_UNKNOWN;
+	}
 }
 
-/**
- *  ARM：对外提供Hook函数的调用接口。
- *
- *  @param  pstInlineHook   inlinehook信息
- *  @return bool            是否hook成功
- */ 
-bool HookArm(ARM_INLINE_HOOK_INFO* pstInlineHook)
+void inlineHookAll()
 {
-    bool bRet = false;
-    
-    while(1)
-    {
-        if(pstInlineHook == NULL)
-        {
-            LOGI("arm pstInlineHook is null.");
-            break;
-        }
+	pid_t pid;
+	int i;
 
-        /* 初始化hook点的信息，将原指令地址处的指令内容存放到hook点结构体中*/
-        if(InitArmHookInfo(pstInlineHook) == false)
-        {
-            LOGI("Init Arm HookInfo fail.");
-            break;
-        }
+	pid = freeze(NULL, ACTION_ENABLE);
 
-        /* 1. 构造桩函数*/
-        if(BuildArmStub(pstInlineHook) == false)
-        {
-            LOGI("Arm BuildStub fail.");
-            break;
-        }
-        LOGI("ARM BuildStub completed.");
+	for (i = 0; i < info.size; ++i) {
+		if (info.item[i].status == REGISTERED) {
+			doInlineHook(&info.item[i]);
+		}
+	}
 
-        /* 2. 构造原指令函数，执行被覆盖指令并跳转回原始指令流程*/
-        if(BuildArmOldFunction(pstInlineHook) == false)
-        {
-            LOGI("BuildArmOldFunction fail.");
-            break;
-        }
-        LOGI("BuildArmOldFunction completed.");
-        
-        /* 3. 改写原指令为跳转指令，跳转到桩函数处*/
-        if(RebuildArmHookTarget(pstInlineHook) == false)
-        {
-            LOGI("RebuildHookAddress fail.");
-            break;
-        }
-        LOGI("RebuildArmHookAddress completed.");
-
-        bRet = true;
-        break;
-    }
-
-    return bRet;
-}
-
-/**
- *  Thumb-2：初始化Hook点信息，根据用户指定位置，将该处的指令存进hook点结构体中
- *
- *  @param  pstInlineHook   hook点信息的结构体
- *  @return bool            是否初始化成功
- */ 
-bool InitThumbHookInfo(THUMB_INLINE_HOOK_INFO* pstInlineHook)
-{
-    bool bRet = false;
-    char caddr[10] = {0};
-    unsigned long addr = 0;
-
-    while(1)
-    {
-        if(pstInlineHook == NULL)
-        {
-            LOGI("Thumb init THUMB_INLINE_HOOK_INFO failed.");
-            break;
-        }
-        /* 计算需要覆盖的opcode长度*/
-        sprintf(caddr, "%p", pstInlineHook->pHookAddr);
-        addr = strtoul(caddr, 0, 16);
-        if(SET_BIT0(addr) % 4 != 0)
-        {
-            pstInlineHook->thumb2OpcodeLen = 10;
-        }
-        else
-        {
-            pstInlineHook->thumb2OpcodeLen = 8;
-        }
-
-        memcpy(pstInlineHook->szbyBackupOpcodes, pstInlineHook->pHookAddr, pstInlineHook->thumb2OpcodeLen);
-        bRet = true;
-        break;
-    }
-
-    return bRet;
-}
-
-/**
- *  Thumb-2：构造桩函数
- *
- *  @param  pstInlineHook   hook点信息的结构体
- *  @return bool            是否构造成功
- */ 
-bool BuildThumbStub(THUMB_INLINE_HOOK_INFO* pstInlineHook)
-{
-    bool bRet = false;
-
-    while(1)
-    {
-        if(pstInlineHook == NULL)
-        {
-            LOGI("Thumb pstInlineHook is null");
-            break;
-        }
-
-        void *p_shellcode_start_s_thumb = &_shellcode_start_s_thumb;
-        void *p_shellcode_end_s_thumb = &_shellcode_end_s_thumb;
-        void *p_hookstub_function_addr_s_thumb = &_hookstub_function_addr_s_thumb;
-        void *p_old_function_addr_s_thumb = &_old_function_addr_s_thumb;
-        /* 申请一块内存，放入桩函数的shellcode*/
-        size_t sShellCodeLength = (char*)p_shellcode_end_s_thumb - (char*)p_shellcode_start_s_thumb;
-        void *pNewShellCode = malloc(sShellCodeLength);
-
-        if(pNewShellCode == NULL)
-        {
-            LOGI("Thumb shellcode malloc fail.");
-            break;
-        }
-        memcpy(pNewShellCode, p_shellcode_start_s_thumb, sShellCodeLength);
-
-        if(ChangePageProperty(pNewShellCode, sShellCodeLength) == false)
-        {
-            LOGI("Thumb change shell code page property fail.");
-            break;
-        }
-
-        /* 用户自定义函数地址*/
-        char **ppHookStubFunctionAddr =(char**)( (char*) pNewShellCode + ((char*)p_hookstub_function_addr_s_thumb - (char*)p_shellcode_start_s_thumb));
-        *ppHookStubFunctionAddr =(char*) pstInlineHook->onCallBack;
-        /* 桩函数地址*/
-        pstInlineHook->pStubShellCodeAddr = pNewShellCode;
-        /* 保留地址：原指令函数指针的存放地址*/
-        pstInlineHook->ppOldFuncAddr  =(void**)( (char*)pNewShellCode + ((char*)p_old_function_addr_s_thumb - (char*)p_shellcode_start_s_thumb));
-
-        bRet = true;
-        break;
-    }
-
-    return bRet;
-}
-
-/**
- *  Thumb-2：构造Thumb指令集的函数跳转
- *
- *  @param  pCurAddress      当前地址，要构造跳转指令的位置
- *  @param  pJumpAddress     目的地址，要从当前位置跳过去的地址
- *  @return bool             跳转指令是否构造成功
- */ 
-bool BuildThumbJumpCode(void *pCurAddress , void *pJumpAddress)
-{
-    bool bRet = false;
-	char caddr[10] = {0};
-    unsigned long addr = 0;
-
-    while(1)
-    {
-        if(pCurAddress == NULL || pJumpAddress == NULL)
-        {
-            LOGI("Thumb jump address null.");
-            break;
-        }
-        
-		sprintf(caddr, "%p", pCurAddress);
-        addr = strtoul(caddr, 0, 16);
-        /* 如果原指令地址不能被4整除就用NOP填充1条thumb16指令的长度，让跳转指令被4整除*/
-        /* LDR PC, [PC, #0]的thumb指令是0xF000F8DF*/
-        if(SET_BIT0(addr) % 4 != 0)
-        {
-            BYTE szLdrPCOpcodes[10] = {0x00, 0xBF, 0xDF, 0xF8, 0x00, 0xF0};
-            memcpy(szLdrPCOpcodes + 6, &pJumpAddress, 4);
-            memcpy(pCurAddress, szLdrPCOpcodes, 10);
-	    char*  buf = *(char**)pCurAddress;
-            __clear_cache(buf,(void*)(buf + 10));
-	    //cacheflush((char*)buf, 10, 0);
-        }
-        else
-        {
-            BYTE szLdrPCOpcodes[8] = {0xDF, 0xF8, 0x00, 0xF0};
-            memcpy(szLdrPCOpcodes + 4, &pJumpAddress, 4);
-            memcpy(pCurAddress, szLdrPCOpcodes, 8);
-	
-	    char* buf = *(char**)pCurAddress;
-            __clear_cache(buf,(void*)(buf + 8));
-	    //cacheflush(buf, 8, 0);
-        }
-
-        bRet = true;
-        break;
-    }
-
-    return bRet;
-}
-
-/**
- *  Thumb-2：构造原指令函数
- *
- *  @param  pstInlineHook   hook点相关信息的结构体
- *  @return bool            原指令函数是否构造成功
- */
-bool BuildThumbOldFunction(THUMB_INLINE_HOOK_INFO* pstInlineHook)
-{
-    bool bRet = false;
-
-    while(1)
-    {
-        if(pstInlineHook == NULL)
-        {
-            LOGI("build old function , thumb pstInlineHook is null");
-            break;
-        }
-
-        /* 申请空间将原指令拷进去并赋可执行权限*/
-        void * pNewEntryForOldFunction = malloc(20);
-        if(pNewEntryForOldFunction == NULL)
-        {
-            LOGI("Thumb new entry for old function malloc fail.");
-            break;
-        }
-
-        if(ChangePageProperty(pNewEntryForOldFunction, 20) == false)
-        {
-            LOGI("thumb change new entry page property fail.");
-            break;
-        }
-        
-        memcpy(pNewEntryForOldFunction, pstInlineHook->szbyBackupOpcodes, pstInlineHook->thumb2OpcodeLen);
-        if(BuildThumbJumpCode(pNewEntryForOldFunction + pstInlineHook->thumb2OpcodeLen, pstInlineHook->pHookAddr + pstInlineHook->thumb2OpcodeLen+1) == false)
-        {
-            LOGI("Thumb build jump opcodes for new entry fail.");
-            break;
-        }
-
-        *(pstInlineHook->ppOldFuncAddr) = pNewEntryForOldFunction;
-
-        bRet = true;
-        break;
-    }
-
-    return bRet;
-}
-
-/**
- *  Thumb：覆盖原指令
- *
- *  @param  pstInlineHook   inlinehook信息
- *  @return bool            原地跳转指令是否构造成功
- */
-bool RebuildThumbHookTarget(THUMB_INLINE_HOOK_INFO* pstInlineHook)
-{
-    bool bRet = false;
-
-    while(1)
-    {
-        if(pstInlineHook == NULL)
-        {
-            LOGI("Thumb cover old instructions, pstInlineHook is null");
-            break;
-        }
-
-        if(ChangePageProperty(pstInlineHook->pHookAddr, pstInlineHook->thumb2OpcodeLen) == false)
-        {
-            LOGI("Thumb change page property error.");
-            break;
-        }
-
-        if(BuildThumbJumpCode(pstInlineHook->pHookAddr, pstInlineHook->pStubShellCodeAddr) == false)
-        {
-            LOGI("Thumb build jump opcodes for new entry fail.");
-            break;
-        }
-
-        bRet = true;
-        break;
-    }
-    
-    return bRet;
-}
-
-/**
- *  Thumb：删除hook点，恢复原指令
- *
- *  @param  pstInlineHook   inlinehook信息
- *  @return bool            删除hook点是否成功
- */
-bool RestroeThumbHookTarget(THUMB_INLINE_HOOK_INFO* pstInlineHook)
-{
-    bool bRet = false;
-
-    while(1)
-    {
-        if(pstInlineHook == NULL)
-        {
-            LOGI("Thumb cover old instructions, pstInlineHook is null");
-            break;
-        }
-
-        if(ChangePageProperty(pstInlineHook->pHookAddr, pstInlineHook->thumb2OpcodeLen) == false)
-        {
-            LOGI("Thumb change page property error.");
-            break;
-        }
-		
-		memcpy(pstInlineHook->pHookAddr, pstInlineHook->szbyBackupOpcodes, pstInlineHook->thumb2OpcodeLen);
-		char *buf = *(char**)pstInlineHook->pHookAddr;
-		__clear_cache(buf, (void*)(buf+pstInlineHook->thumb2OpcodeLen));
-		//cacheflush(buf, pstInlineHook->thumb2OpcodeLen, 0);
-		
-        bRet = true;
-        break;
-    }
-    
-    return bRet;
-}
-
-/**
- *  Thumb：对外提供hook的入口函数
- *
- *  @param  pstInlineHook   inlinehook信息
- *  @return bool            是否hook成功
- */
-bool HookThumb(THUMB_INLINE_HOOK_INFO* pstInlineHook)
-{
-    bool bRet = false;
-
-    while(1)
-    {
-        if(pstInlineHook == NULL)
-        {
-            LOGI("Thumb pstInlineHook is null.");
-            break;
-        }
-
-        if(InitThumbHookInfo(pstInlineHook) == false)
-        {
-            LOGI("Init Thumb HookInfo fail.");
-            break;
-        }
-		LOGI("ARM InitThumbHookInfo completed.");
-
-        if(BuildThumbStub(pstInlineHook) == false)
-        {
-            LOGI("Thumb BuildStub fail.");
-            break;
-        }
-        LOGI("ARM BuildStub completed.");
-
-        if(BuildThumbOldFunction(pstInlineHook) == false)
-        {
-            LOGI("BuildThumbOldFunction fail.");
-            break;
-        }
-        LOGI("BuildThumbOldFunction completed.");
-        
-        if(RebuildThumbHookTarget(pstInlineHook) == false)
-        {
-            LOGI("RebuildHookAddress fail.");
-            break;
-        }
-        LOGI("RebuildThumbHookAddress completed.");
-		
-        bRet = true;
-        break;
-    }
-
-    return bRet;
+	unFreeze(pid);
 }
