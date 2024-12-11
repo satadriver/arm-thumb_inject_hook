@@ -10,6 +10,8 @@ const char *linker_path = (const char *)"/usr/lib/libc.so.6";
 
 //#define __arm__
 
+int g_tag = 0;
+
 int ptrace_readdata(pid_t pid,  uint8_t *src, uint8_t *buf, size_t size)
 {
     uint32_t i, j, remain;
@@ -75,6 +77,8 @@ int ptrace_writedata(pid_t pid, uint8_t *dest, uint8_t *data, size_t size)
     return 0;
 }
 
+
+
 #if defined(__arm__)
 int ptrace_call(pid_t pid, uint32_t addr, long *params, uint32_t num_params, struct pt_regs* regs)
 {    
@@ -108,10 +112,13 @@ int ptrace_call(pid_t pid, uint32_t addr, long *params, uint32_t num_params, str
 
     regs->ARM_lr = 0;
 
-    if (ptrace_setregs(pid, regs) == -1
-            || ptrace_continue(pid) == -1) {
+    if (ptrace_setregs(pid, regs) == -1 || ptrace_continue(pid) == -1) {
         printf("error\n");
         return -1;
+    }
+
+    if(g_tag){
+        return 0;
     }
 
     int stat = 0;
@@ -259,7 +266,10 @@ long * parameters, int param_num, struct pt_regs * regs)
     DEBUG_PRINT("[+] Calling %s in target process.\n", func_name);
     if (ptrace_call(target_pid, (uint32_t)func_addr, parameters, param_num, regs) == -1)
         return -1;
-
+        
+    if(g_tag ){
+        return 0;
+    }
     if (ptrace_getregs(target_pid, regs) == -1)
         return -1;
     DEBUG_PRINT("[+] Target process returned from %s, return value=%x,cpsr=%x, pc=%x \n",
@@ -382,8 +392,15 @@ const char *param, size_t param_size)
     ptrace_writedata(target_pid, map_base + FUNCTION_PARAM_ADDR_OFFSET,(uint8_t*) param, strlen(param) + 1);
     parameters[0] = (unsigned long)map_base + FUNCTION_PARAM_ADDR_OFFSET;
 
+    g_tag = 1;
+
     if (ptrace_call_wrapper(target_pid, "InjectEntry", inject_entry_addr, parameters, 1, &regs) == -1)
         goto exit;
+
+    if(g_tag){
+        //ptrace_detach(target_pid);
+        goto exit;
+    }
 
     int retval = (int)ptrace_retval(&regs);
     DEBUG_PRINT("InjectEntry return value = %x\n", retval);
@@ -437,7 +454,7 @@ int main(int argc, char** argv) {
         printf("process:%s pid:%d\r\n",argv[1],target_pid);
     }
     
-    //myTest((char*)libc_path);  
+    //myTest((char*)libc_path); 
 
     ret = inject_remote_process(target_pid, argv[2], argv[3],  argv[4], strlen(argv[4]) );
     return ret;
