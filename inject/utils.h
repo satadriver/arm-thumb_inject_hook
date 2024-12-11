@@ -10,3 +10,5 @@ void* get_module_base(pid_t pid, const char* module_name);
 char * getProcessName(char * path);
 
 void myTest(char * soPath);
+
+int IsNumber(char * str);

@@ -182,7 +182,7 @@ int Hook(void* new_func,char* so_path,void* old_func)
 
 int GotHookTest(char * param){
 
-    FILE * fp = freopen("/root/ljg.txt","ab+",stdout);
+    FILE * fp = freopen("/tmp/ljg.txt","ab+",stdout);
     LOGD("Start hooking\n");
 
     void * handle = dlopen("/usr/lib/libc.so.6",RTLD_NOW| RTLD_GLOBAL );

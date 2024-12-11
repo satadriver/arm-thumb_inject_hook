@@ -242,7 +242,7 @@ static struct inlineHookItem *addInlineHookItem() {
 	struct inlineHookItem *item;
 
 	if (info.size >= 1024) {
-        printf("hook point overflow\r\n");
+        printf("hook table overflow\r\n");
 		return NULL;
 	}
 

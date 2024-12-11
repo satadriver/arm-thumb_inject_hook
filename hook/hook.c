@@ -47,7 +47,7 @@ int unHook()
 
 int InjectEntry(char * param)
 {
-    FILE * fp = freopen("/root/ljg.txt","ab+",stdout);
+    FILE * fp = freopen("/tmp/ljg.txt","ab+",stdout);
     test1("test0");
     getchar();
     hook();
@@ -56,4 +56,5 @@ int InjectEntry(char * param)
     unHook();
     test1("test2");
     fclose(fp);
+    return 0x12345678;
 }

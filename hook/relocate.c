@@ -465,7 +465,9 @@ static void relocateInstructionInThumb(uint32_t target_addr, uint16_t *orig_inst
 		orig_boundaries[*count] = orig_pos * sizeof(uint16_t);
 		trampoline_boundaries[*count] = trampoline_pos * sizeof(uint16_t);
 		++(*count);
-		
+		//0b11100 Thumb 16-bit unconditional branch instruction, defined in all Thumb architectures
+		//0b111xx Thumb 32-bit instructions, defined in Thumb-2, see Instruction encoding for 32-bit Thumb
+		//0bxxxxx Thumb 16-bit instructions.
 		if ((orig_instructions[orig_pos] >> 11) >= 0x1D && (orig_instructions[orig_pos] >> 11) <= 0x1F) {
 			if (orig_pos + 2 > length / sizeof(uint16_t)) {
 				break;

@@ -165,3 +165,21 @@ void myTest(char * soPath){
     }
 
 }
+
+
+int IsNumber(char * str){
+    int i = 0;
+    int len = strlen(str);
+    for( i = 0;i < len;i ++){
+        if(str[i] >= '0' && str[i] <= '9'){
+
+        }
+        else{
+            return 0;
+        }
+    }
+    if(i >= len){
+        return 1;
+    }
+    return 0;
+}

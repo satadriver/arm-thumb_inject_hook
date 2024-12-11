@@ -253,7 +253,8 @@ long ptrace_cpsr(struct pt_regs * regs)
 
 
 
-int ptrace_call_wrapper(pid_t target_pid, const char * func_name, void * func_addr, long * parameters, int param_num, struct pt_regs * regs)
+int ptrace_call_wrapper(pid_t target_pid, const char * func_name, void * func_addr, 
+long * parameters, int param_num, struct pt_regs * regs)
 {
     DEBUG_PRINT("[+] Calling %s in target process.\n", func_name);
     if (ptrace_call(target_pid, (uint32_t)func_addr, parameters, param_num, regs) == -1)
@@ -268,7 +269,8 @@ int ptrace_call_wrapper(pid_t target_pid, const char * func_name, void * func_ad
 
 
 
-int inject_remote_process(pid_t target_pid, const char *library_path, const char *function_name, const char *param, size_t param_size)
+int inject_remote_process(pid_t target_pid, const char *library_path, const char *function_name, 
+const char *param, size_t param_size)
 {
     int ret = -1;
     void *mmap64_addr, *dlopen_addr, *dlsym_addr, *dlclose_addr, *dlerror_addr, * getpid_addr;
@@ -277,7 +279,8 @@ int inject_remote_process(pid_t target_pid, const char *library_path, const char
     struct pt_regs regs, original_regs;
 
     /*
-    uint8_t *dlopen_param1_ptr, *dlsym_param2_ptr, *saved_r0_pc_ptr, *inject_param_ptr, *remote_code_ptr, *local_code_ptr;
+    uint8_t *dlopen_param1_ptr, *dlsym_param2_ptr, *saved_r0_pc_ptr, *inject_param_ptr, 
+    *remote_code_ptr, *local_code_ptr;
     extern uint32_t _dlopen_addr_s, _dlopen_param1_s, _dlopen_param2_s, _dlsym_addr_s, \
         _dlsym_param2_s, _dlclose_addr_s, _inject_start_s, _inject_end_s, _inject_function_param_s, \
         _saved_cpsr_s, _saved_r0_pc_s;
@@ -299,13 +302,11 @@ int inject_remote_process(pid_t target_pid, const char *library_path, const char
     if (ptrace_getregs(target_pid, &regs) == -1)
         goto exit;
 
-
     DEBUG_PRINT("[+] Target process init regs:r0=%x,cpsr=%x, pc=%x \n",
             ptrace_retval(&regs),ptrace_cpsr(&regs), ptrace_ip(&regs));
 
     /* save original registers */
     memcpy(&original_regs, &regs, sizeof(regs));
-
 
     getpid_addr = get_remote_addr(target_pid, libc_path, (void *)getpid,"getpid");
     DEBUG_PRINT("[+] Remote getpid address: %x\n", getpid_addr);
@@ -359,13 +360,15 @@ int inject_remote_process(pid_t target_pid, const char *library_path, const char
         info = (char*)ptrace_retval(&regs);
         if(info){
             char buf[256] = {0};
-            //ptrace_readdata(target_pid, info,buf, 4 );
-            //printf("dlopen error:%s\r\n",buf);
-        }       
+            ptrace_readdata(target_pid, info,buf, sizeof(buf) -1 );
+            printf("dlopen error:%s\r\n",buf);           
+        }    
+        goto exit;   
     }
 
 #define FUNCTION_NAME_ADDR_OFFSET       0x100
-    ptrace_writedata(target_pid, map_base + FUNCTION_NAME_ADDR_OFFSET, (uint8_t*)function_name, strlen(function_name) + 1);
+    ptrace_writedata(target_pid, map_base + FUNCTION_NAME_ADDR_OFFSET, 
+    (uint8_t*)function_name, strlen(function_name) + 1);
     parameters[0] = (unsigned long)sohandle;
     parameters[1] = (unsigned long)map_base + FUNCTION_NAME_ADDR_OFFSET;
 
@@ -381,6 +384,9 @@ int inject_remote_process(pid_t target_pid, const char *library_path, const char
 
     if (ptrace_call_wrapper(target_pid, "InjectEntry", inject_entry_addr, parameters, 1, &regs) == -1)
         goto exit;
+
+    int retval = (int)ptrace_retval(&regs);
+    DEBUG_PRINT("InjectEntry return value = %x\n", retval);
 
     printf("Press enter to dlclose and detach\n");
     getchar();
@@ -404,7 +410,7 @@ exit:
 int main(int argc, char** argv) {
     int ret = 0;
     if(argc < 4){
-        printf("example:%s pid modulePath functionName parameter",argv[0]);
+        printf("example:%s processName modulePath functionName parameter",argv[0]);
         printf("such as:%s httpd /root/injected.so InjectEntry test\r\n",argv[0]);
         return 0;
     }
@@ -416,16 +422,19 @@ int main(int argc, char** argv) {
     for(int i = 0;i < argc;i ++){
         printf("argv[%d]:%s\r\n",i,argv[i]);
     }
-    pid_t target_pid;
-    target_pid = find_pid_of(argv[1]);
-    //target_pid = atoi(argv[1]);
-    //target_pid = find_pid_of("/data/test");
-    if (-1 == target_pid) {
+    pid_t target_pid = atoi(argv[1]);
+    if(target_pid == 0){
+        if(IsNumber(argv[1]) == 0){
+            target_pid = find_pid_of(argv[1]);
+        }
+    }
+    
+    if (-1 == target_pid || target_pid== 0) {
         printf("Can't get the pid of the process:%s\r\n",argv[1]);
         return -1;
     }
     else{
-        printf("pid:%d of the process:%s\r\n",target_pid,argv[1]);
+        printf("process:%s pid:%d\r\n",argv[1],target_pid);
     }
     
     //myTest((char*)libc_path);  

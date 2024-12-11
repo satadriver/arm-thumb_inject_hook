@@ -215,7 +215,7 @@ int hook_entry(char * a){
 
 
 int HookTest(char * param){
-    FILE * fp = freopen("/root/ljg.txt","ab+",stdout);
+    FILE * fp = freopen("/tmp/ljg.txt","ab+",stdout);
     puts("hello1\r\n");
     hook_native();
     puts("hello2\r\n");
