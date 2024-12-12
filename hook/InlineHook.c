@@ -21,7 +21,7 @@ created time: 2015-11-30
 #include "relocate.h"
 #include "inlineHook.h"
 #include <unistd.h>
-#include <sys/types.h>
+
 #include <sys/syscall.h>
 
 

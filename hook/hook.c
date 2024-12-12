@@ -12,6 +12,7 @@ int new_puts(const char *string)
 
 void test1_new(char * param){
     printf("test1_new\r\n");
+    old_puts(param);
 }
 
 void test1(char * param){

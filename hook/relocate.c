@@ -31,7 +31,6 @@ enum INSTRUCTION_TYPE {
 	// CB{N}Z <Rn>, <label>
 	CB_THUMB16,
 
-
 	// BLX <label>
 	BLX_THUMB32,
 	// BL <label>
@@ -395,7 +394,6 @@ uint16_t low_instruction, uint16_t *trampoline_instructions)
 		trampoline_instructions[5] = value >> 16;
 		offset = 6;
 	}
-
 	else if (type == TBB_THUMB32 || type == TBH_THUMB32) {
 		int rm;
 		int r;
@@ -490,8 +488,6 @@ static void relocateInstructionInThumb(uint32_t target_addr, uint16_t *orig_inst
 			break;
 		}
 	}
-
-
 	
 	lr = target_addr + orig_pos * sizeof(uint16_t) + 1;
 	trampoline_instructions[trampoline_pos] = 0xF8DF;

@@ -105,6 +105,8 @@ void* get_module_base(pid_t pid, const char* module_name)
                 pch = strtok( line, "-" );
                 addr = strtoul( pch, NULL, 16 );
 
+                //32位linux程序中默认的text加载地址为0x08408000,64位的改为0x00400000,
+                //此时计算base地址就没什么用了
                 if (addr == 0x8000){
                     //addr = 0;
                 }

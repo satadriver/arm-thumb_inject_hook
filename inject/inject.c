@@ -2,11 +2,13 @@
 #include "inject.h"
 #include "utils.h"
 
-
-const char *libc_path = "/usr/lib/libc.so.6";
 //const char *libc_path = "/system/lib/libc.so";
 //const char *linker_path = "/system/bin/linker";
+
+const char *libc_path = "/usr/lib/libc.so.6";
 const char *linker_path = (const char *)"/usr/lib/libc.so.6";
+
+
 
 //#define __arm__
 
@@ -121,6 +123,9 @@ int ptrace_call(pid_t pid, uint32_t addr, long *params, uint32_t num_params, str
         return 0;
     }
 
+//程序中的0xb7f就表示子进程进入了暂停状态，且发送的错误信号为11(SIGSEGV)，
+//它表示试图访问未分配给自己的内存, 或试图往没有写权限的内存地址写数据。
+//由于我们在前面设置了regs->ARM_lr = 0，它就会返回到0地址处继续执行，这样就会产生SIGSEGV了.
     int stat = 0;
     waitpid(pid, &stat, WUNTRACED);
     while (stat != 0xb7f) {
@@ -266,7 +271,7 @@ long * parameters, int param_num, struct pt_regs * regs)
     DEBUG_PRINT("[+] Calling %s in target process.\n", func_name);
     if (ptrace_call(target_pid, (uint32_t)func_addr, parameters, param_num, regs) == -1)
         return -1;
-        
+
     if(g_tag ){
         return 0;
     }
@@ -392,7 +397,7 @@ const char *param, size_t param_size)
     ptrace_writedata(target_pid, map_base + FUNCTION_PARAM_ADDR_OFFSET,(uint8_t*) param, strlen(param) + 1);
     parameters[0] = (unsigned long)map_base + FUNCTION_PARAM_ADDR_OFFSET;
 
-    g_tag = 1;
+    g_tag = 0;
 
     if (ptrace_call_wrapper(target_pid, "InjectEntry", inject_entry_addr, parameters, 1, &regs) == -1)
         goto exit;
