@@ -44,7 +44,7 @@ bool InlineHook(void *pHookAddr, void (*onCallBack)(struct pt_regs *))
         return bRet;
     }
 	
-    //gs_vecInlineHookInfo.push_back(pstInlineHook);
+    //gs_vecInlineHookg_hookInfo.push_back(pstInlineHook);
 	LOGI("HookArm completed.\r\n");
     return true;
 }

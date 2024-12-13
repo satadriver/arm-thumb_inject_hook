@@ -63,7 +63,7 @@ struct inlineHookInfo {
 	int size;
 };
 
-static struct inlineHookInfo info = {0};
+static struct inlineHookInfo g_hookInfo = {0};
 
 static int getAllTids(pid_t exclude_tid, pid_t *tids)
 {
@@ -82,6 +82,7 @@ static int getAllTids(pid_t exclude_tid, pid_t *tids)
 
 	dir = opendir(dir_path);
     if (dir == NULL) {
+		printf("%s opendir %s error\r\n",__FUNCTION__,dir_path);
     	return 0;
     }
 
@@ -109,6 +110,7 @@ static bool doProcessThreadPC(struct inlineHookItem *item, struct pt_regs *regs,
 				if (offset == item->orig_boundaries[i]) {
 					regs->ARM_pc = (uint32_t) item->trampoline_instructions + 
                     item->trampoline_boundaries[i];
+					printf("action:%d,ARM_pc:%p, target_addr:%p\r\n", action,regs->ARM_pc,item->target_addr);
 					return true;
 				}
 			}
@@ -118,6 +120,7 @@ static bool doProcessThreadPC(struct inlineHookItem *item, struct pt_regs *regs,
 			for (i = 0; i < item->count; ++i) {
 				if (offset == item->trampoline_boundaries[i]) {
 					regs->ARM_pc = CLEAR_BIT0(item->target_addr) + item->orig_boundaries[i];
+					printf("action:%d,ARM_pc:%p, target_addr:%p\r\n",action, regs->ARM_pc,item->target_addr);
 					return true;
 				}
 			}
@@ -135,8 +138,11 @@ static void processThreadPC(pid_t tid, struct inlineHookItem *item, int action)
 		if (item == NULL) {
 			int pos;
 
-			for (pos = 0; pos < info.size; ++pos) {
-				if (doProcessThreadPC(&info.item[pos], &regs, action) == true) {
+			for (pos = 0; pos < g_hookInfo.size; ++pos) {
+
+				printf("tid:%d,num:%d,action:%d item null\r\n",tid,pos,action);
+
+				if (doProcessThreadPC(&g_hookInfo.item[pos], &regs, action) == true) {
 					break;
 				}
 			}
@@ -159,7 +165,6 @@ static pid_t freeze(struct inlineHookItem *item, int action)
 	count = getAllTids(gettid(), tids);
 	if (count > 0) {
 		pid = fork();
-
 		if (pid == 0) {
 			int i;
 
@@ -178,7 +183,6 @@ static pid_t freeze(struct inlineHookItem *item, int action)
 
 			raise(SIGKILL);
 		}
-
 		else if (pid > 0) {
 			waitpid(pid, NULL, WUNTRACED);
 		}
@@ -206,6 +210,7 @@ static bool isExecutableAddr(uint32_t addr)
 
 	fp = fopen("/proc/self/maps", "r");
 	if (fp == NULL) {
+		printf("%s fopen maps error\r\n",__FUNCTION__);
 		return false;
 	}
 
@@ -229,9 +234,9 @@ static struct inlineHookItem *findInlineHookItem(uint32_t target_addr)
 {
 	int i;
 
-	for (i = 0; i < info.size; ++i) {
-		if (info.item[i].target_addr == target_addr) {
-			return &info.item[i];
+	for (i = 0; i < g_hookInfo.size; ++i) {
+		if (g_hookInfo.item[i].target_addr == target_addr) {
+			return &g_hookInfo.item[i];
 		}
 	}
 
@@ -241,21 +246,21 @@ static struct inlineHookItem *findInlineHookItem(uint32_t target_addr)
 static struct inlineHookItem *addInlineHookItem() {
 	struct inlineHookItem *item;
 
-	if (info.size >= 1024) {
-        printf("hook table overflow\r\n");
+	if (g_hookInfo.size >= 1024) {
+        printf("hook information table size:%d overflow\r\n",g_hookInfo.size);
 		return NULL;
 	}
 
-	item = &info.item[info.size];
-	++info.size;
+	item = &g_hookInfo.item[g_hookInfo.size];
+	++g_hookInfo.size;
 
 	return item;
 }
 
 static void deleteInlineHookItem(int pos)
 {
-	info.item[pos] = info.item[info.size - 1];
-	--info.size;
+	g_hookInfo.item[pos] = g_hookInfo.item[g_hookInfo.size - 1];
+	--g_hookInfo.size;
 }
 
 enum ele7en_status registerInlineHook(uint32_t target_addr, uint32_t new_addr, 
@@ -264,6 +269,7 @@ uint32_t **proto_addr)
 	struct inlineHookItem *item;
 
 	if (!isExecutableAddr(target_addr) || !isExecutableAddr(new_addr)) {
+		printf("%s new_addr:%p or target_addr:%p isExecutableAddr 0\r\n",__FUNCTION__,new_addr,target_addr);
 		return ELE7EN_ERROR_NOT_EXECUTABLE;
 	}
 
@@ -321,13 +327,13 @@ enum ele7en_status inlineUnHook(uint32_t target_addr)
 {
 	int i;
 
-	for (i = 0; i < info.size; ++i) {
-		if (info.item[i].target_addr == target_addr && info.item[i].status == HOOKED) {
+	for (i = 0; i < g_hookInfo.size; ++i) {
+		if (g_hookInfo.item[i].target_addr == target_addr && g_hookInfo.item[i].status == HOOKED) {
 			pid_t pid;
 
-			pid = freeze(&info.item[i], ACTION_DISABLE);
+			pid = freeze(&g_hookInfo.item[i], ACTION_DISABLE);
 
-			doInlineUnHook(&info.item[i], i);
+			doInlineUnHook(&g_hookInfo.item[i], i);
 
 			unFreeze(pid);
 
@@ -345,9 +351,9 @@ void inlineUnHookAll()
 
 	pid = freeze(NULL, ACTION_DISABLE);
 
-	for (i = 0; i < info.size; ++i) {
-		if (info.item[i].status == HOOKED) {
-			doInlineUnHook(&info.item[i], i);
+	for (i = 0; i < g_hookInfo.size; ++i) {
+		if (g_hookInfo.item[i].status == HOOKED) {
+			doInlineUnHook(&g_hookInfo.item[i], i);
 			--i;
 		}
 	}
@@ -398,9 +404,9 @@ enum ele7en_status inlineHook(uint32_t target_addr)
 	struct inlineHookItem *item;
 
 	item = NULL;
-	for (i = 0; i < info.size; ++i) {
-		if (info.item[i].target_addr == target_addr) {
-			item = &info.item[i];
+	for (i = 0; i < g_hookInfo.size; ++i) {
+		if (g_hookInfo.item[i].target_addr == target_addr) {
+			item = &g_hookInfo.item[i];
 			break;
 		}
 	}
@@ -435,9 +441,9 @@ void inlineHookAll()
 
 	pid = freeze(NULL, ACTION_ENABLE);
 
-	for (i = 0; i < info.size; ++i) {
-		if (info.item[i].status == REGISTERED) {
-			doInlineHook(&info.item[i]);
+	for (i = 0; i < g_hookInfo.size; ++i) {
+		if (g_hookInfo.item[i].status == REGISTERED) {
+			doInlineHook(&g_hookInfo.item[i]);
 		}
 	}
 

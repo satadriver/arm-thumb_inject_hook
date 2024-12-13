@@ -9,8 +9,9 @@ const char *libc_path = "/usr/lib/libc.so.6";
 const char *linker_path = (const char *)"/usr/lib/libc.so.6";
 
 
-
-//#define __arm__
+#ifndef __arm__
+#define __arm__
+#endif
 
 int g_tag = 0;
 
